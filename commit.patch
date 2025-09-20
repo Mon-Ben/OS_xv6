@@ -1,3 +1,12 @@
+diff --git a/.gitignore b/.gitignore
+index ba36a14..615c3b6 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -23,3 +23,4 @@ submissions/
+ compile_commands.json
+ .gdb_history
+ .cache/
++commit.patch
 diff --git a/Makefile b/Makefile
 index b971308..1f68a81 100644
 --- a/Makefile
@@ -47,10 +56,10 @@ index 0000000..a859654
 +q
 diff --git a/commit.patch b/commit.patch
 new file mode 100644
-index 0000000..278dcb7
+index 0000000..06ee201
 --- /dev/null
 +++ b/commit.patch
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,392 @@
 +diff --git a/Makefile b/Makefile
 +index b971308..1f68a81 100644
 +--- a/Makefile
@@ -82,6 +91,213 @@ index 0000000..278dcb7
 + 
 + ##
 + ##  FOR testing lab grading script
++diff --git a/commands.gdb b/commands.gdb
++new file mode 100644
++index 0000000..a859654
++--- /dev/null
+++++ b/commands.gdb
++@@ -0,0 +1,10 @@
+++b trap.c:112
+++c
+++p cpus[$tp]->proc->name
+++b trap.c:55
+++c
+++p cpus[$tp]->proc->name
+++c
+++p cpus[$tp]->proc->name
+++da
+++q
++diff --git a/commit.patch b/commit.patch
++new file mode 100644
++index 0000000..278dcb7
++--- /dev/null
+++++ b/commit.patch
++@@ -0,0 +1,185 @@
+++diff --git a/Makefile b/Makefile
+++index b971308..1f68a81 100644
+++--- a/Makefile
++++++ b/Makefile
+++@@ -157,6 +157,9 @@ UPROGS=\
+++ 	$U/_grind\
+++ 	$U/_wc\
+++ 	$U/_zombie\
++++	$U/_sleep\
++++	$U/_pingpong\
++++	$U/_find\
+++ 
+++ 
+++ ifeq ($(LAB),syscall)
+++@@ -242,15 +245,8 @@ qemu-gdb: $K/kernel .gdbinit fs.img
+++ 	@echo "*** Now run 'gdb' in another window." 1>&2
+++ 	$(QEMU) $(QEMUOPTS) -S $(QEMUGDB)
+++ 
+++-GDBARGS = 
+++-GDBARGS += -ex 'set architecture riscv:rv64'
+++-GDBARGS += -ex 'target remote 127.0.0.1:$(GDBPORT)'
+++-GDBARGS += -ex 'symbol-file kernel/kernel'
+++-GDBARGS += -ex 'set riscv use-compressed-breakpoints yes'
+++-
+++-
+++ gdb: 
+++-	$(GDB) $(GDBARGS)
++++	$(GDB)
+++ 
+++ ##
+++ ##  FOR testing lab grading script
+++diff --git a/user/find.c b/user/find.c
+++new file mode 100644
+++index 0000000..8d38d84
+++--- /dev/null
++++++ b/user/find.c
+++@@ -0,0 +1,85 @@
++++// user/find.c
++++#include "kernel/types.h"
++++#include "kernel/stat.h"
++++#include "user/user.h"
++++#include "kernel/fs.h"
++++
++++char*
++++fmtname(char *path)
++++{
++++  static char buf[DIRSIZ+1];
++++  char *p;
++++
++++  // 找到最后一个 '/'
++++  for(p=path+strlen(path); p >= path && *p != '/'; p--)
++++    ;
++++  p++;
++++
++++  // 返回 '\0' 结尾的文件名
++++  if(strlen(p) >= DIRSIZ)
++++    return p;
++++  memmove(buf, p, strlen(p));
++++  buf[strlen(p)] = 0;
++++  return buf;
++++}
++++
++++void
++++find(char *path, const char *target)
++++{
++++  char buf[512], *p;
++++  int fd;
++++  struct dirent de;
++++  struct stat st;
++++
++++  if((fd = open(path, 0)) < 0){
++++    fprintf(2, "find: cannot open %s\n", path);
++++    return;
++++  }
++++  if(fstat(fd, &st) < 0){
++++    fprintf(2, "find: cannot stat %s\n", path);
++++    close(fd);
++++    return;
++++  }
++++
++++  switch(st.type){
++++  case T_FILE:
++++    if(strcmp(fmtname(path), target) == 0)
++++      printf("%s\n", path);
++++    break;
++++
++++  case T_DIR:
++++    // 如果目录本身名字就匹配，打印一次（题目要求目录也要输出）
++++    if(strcmp(fmtname(path), target) == 0)
++++      printf("%s\n", path);
++++
++++    if(strlen(path) + 1 + DIRSIZ + 1 > sizeof buf){
++++      printf("find: path too long\n");
++++      break;
++++    }
++++    strcpy(buf, path);
++++    p = buf+strlen(buf);
++++    *p++ = '/';
++++    while(read(fd, &de, sizeof(de)) == sizeof(de)){
++++      if(de.inum == 0)
++++        continue;
++++      memmove(p, de.name, DIRSIZ);
++++      p[DIRSIZ] = 0;
++++      if(strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0)
++++        continue;
++++      find(buf, target);   // 递归，里面会负责打印
++++    }
++++    break;
++++  }
++++  close(fd);
++++}
++++
++++int
++++main(int argc, char *argv[])
++++{
++++  if(argc != 3){
++++    fprintf(2, "Usage: find <path> <name>\n");
++++    exit(1);
++++  }
++++  find(argv[1], argv[2]);
++++  exit(0);
++++}
+++\ No newline at end of file
+++diff --git a/user/pingpong.c b/user/pingpong.c
+++new file mode 100644
+++index 0000000..d6f7ee9
+++--- /dev/null
++++++ b/user/pingpong.c
+++@@ -0,0 +1,34 @@
++++#include "kernel/types.h"
++++#include "user.h"
++++int main(int argc,char *argv[])
++++{
++++    int c2f[2],f2c[2];//c2f:子读父写，f2c：父读子写
++++    char c[4];
++++    pipe(c2f);
++++    pipe(f2c);
++++    int fapid = getpid();
++++    int pid = fork();
++++    if(pid==0){
++++        close(0);
++++        dup(c2f[0]);
++++        close(c2f[0]);
++++        close(c2f[1]);
++++        read(0,c,4);
++++        printf("%d: received %s from pid %d\n",getpid(),c,fapid);
++++        //写入"pong"
++++        close(f2c[0]);
++++        write(f2c[1],"pong",4);
++++        close(f2c[1]);
++++    } else{//写入数据"ping"
++++        close(0);
++++        close(c2f[0]);
++++        write(c2f[1],"ping",4);
++++        close(c2f[1]);
++++        dup(f2c[0]);
++++        close(f2c[0]);
++++        close(f2c[1]);
++++        read(0,c,4);
++++        printf("%d: received %s from pid %d\n",getpid(),c,pid);
++++    }
++++    exit(0);
++++}
+++\ No newline at end of file
+++diff --git a/user/sleep.c b/user/sleep.c
+++new file mode 100644
+++index 0000000..c45b6d7
+++--- /dev/null
++++++ b/user/sleep.c
+++@@ -0,0 +1,14 @@
++++#include "kernel/types.h"
++++#include "user.h"
++++
++++int main(int argc,char *argv[])
++++{
++++    if(argc != 2){
++++        printf("Sleep needs one argument!\n");
++++        exit(-1);
++++    }
++++    int ticks = atoi(argv[1]);
++++    sleep(ticks);
++++    printf("(nothing happens for a little while)\n");
++++    exit(0);
++++}
+++\ No newline at end of file
 +diff --git a/user/find.c b/user/find.c
 +new file mode 100644
 +index 0000000..8d38d84
