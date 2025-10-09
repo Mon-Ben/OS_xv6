@@ -15,6 +15,8 @@ struct proc *initproc;
 int nextpid = 1;
 struct spinlock pid_lock;
 
+static int yield_print_flag = 0;   // 0: 不打印   1: 需要打印
+
 extern void forkret(void);
 static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
@@ -291,9 +293,6 @@ void reparent(struct proc *p) {
   }
 }
 
-// Exit the current process.  Does not return.
-// An exited process remains in the zombie state
-// until its parent calls wait().
 void exit(int status) {
   struct proc *p = myproc();
 
@@ -337,10 +336,41 @@ void exit(int status) {
   acquire(&original_parent->lock);
 
   acquire(&p->lock);
+    // Print parent process information
+  if (original_parent) {
+    char *parent_state;
+    switch (original_parent->state) {
+      case UNUSED: parent_state = "unused"; break;
+      case SLEEPING: parent_state = "sleep"; break;
+      case RUNNABLE: parent_state = "runble"; break;
+      case RUNNING: parent_state = "run"; break;
+      case ZOMBIE: parent_state = "zombie"; break;
+      default: parent_state = "unknown"; break;
+    }
+    exit_info("proc %d exit, parent pid %d, name %s, state %s\n", 
+              p->pid, original_parent->pid, original_parent->name, parent_state);
+  }
 
-  // Give any children to init.
-  reparent(p);
-
+  int child_count = 0;
+  struct proc *child;
+  for (child = proc; child < &proc[NPROC]; child++) {
+    if (child->parent == p) {
+      char *child_state;
+      switch (child->state) {
+        case UNUSED: child_state = "unused"; break;
+        case SLEEPING: child_state = "sleep"; break;
+        case RUNNABLE: child_state = "runble"; break;
+        case RUNNING: child_state = "run"; break;
+        case ZOMBIE: child_state = "zombie"; break;
+        default: child_state = "unknown"; break;
+      }
+      exit_info("proc %d exit, child %d, pid %d, name %s, state %s\n", 
+                p->pid, child_count, child->pid, child->name, child_state);
+      child_count++;
+    }
+  }
+/* 3. 再过继、唤醒 init 等后续流程 */
+reparent(p);
   // Parent might be sleeping in wait().
   wakeup1(original_parent);
 
@@ -356,7 +386,7 @@ void exit(int status) {
 
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
-int wait(uint64 addr) {
+int wait(uint64 addr,int flags) {
   struct proc *np;
   int havekids, pid;
   struct proc *p = myproc();
@@ -399,9 +429,14 @@ int wait(uint64 addr) {
       release(&p->lock);
       return -1;
     }
+    // ===== 非阻塞出口 =====
+    if(flags == 1){                    // 立即返回
+      release(&p->lock);
+      return -2;                       // 约定：-2 表示「子进程未退出」
+    }
 
-    // Wait for a child to exit.
-    sleep(p, &p->lock);  // DOC: wait-sleep
+    // ===== 原阻塞路径 =====
+    sleep(p, &p->lock);                // 等待子进程 exit 时唤醒
   }
 }
 
@@ -412,38 +447,28 @@ int wait(uint64 addr) {
 //  - swtch to start running that process.
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
+/* ---------- 调度 / yield ---------- */
 void scheduler(void) {
-  struct proc *p;
-  struct cpu *c = mycpu();
-
+  struct proc *p; struct cpu *c = mycpu();
   c->proc = 0;
   for (;;) {
-    // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
-
     int found = 0;
     for (p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if (p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
+        /* 任务三：仅 yield 发起的调度才打印 */
+        if (yield_print_flag)
+          printf("Next runnable process pid is %d and user pc is %p\n",
+                 p->pid, (void *)p->trapframe->epc);
         p->state = RUNNING;
         c->proc = p;
         swtch(&c->context, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-
-        found = 1;
+        c->proc = 0; found = 1;
       }
       release(&p->lock);
     }
-    if (found == 0) {
-      intr_on();
-      asm volatile("wfi");
-    }
+    if (found == 0) { intr_on(); asm volatile("wfi"); }
   }
 }
 
@@ -468,13 +493,22 @@ void sched(void) {
   mycpu()->intena = intena;
 }
 
-// Give up the CPU for one scheduling round.
 void yield(void) {
   struct proc *p = myproc();
+  /* 任务三：临界区外打印前两条 */
+  uint64 ctx_start = (uint64)&p->context;
+  uint64 ctx_end   = ctx_start + sizeof(p->context);
+  printf("Save the context of the process to the memory region from address %p to %p\n",
+         (void *)ctx_start, (void *)ctx_end);
+  printf("Current running process pid is %d and user pc is %p\n",
+         p->pid, (void *)p->trapframe->epc);
+
+  yield_print_flag = 1;          /* 仅本次调度打印第三条 */
   acquire(&p->lock);
   p->state = RUNNABLE;
   sched();
   release(&p->lock);
+  yield_print_flag = 0;
 }
 
 // A fork child's very first scheduling by scheduler()
