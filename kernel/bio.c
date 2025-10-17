@@ -23,69 +23,144 @@
 #include "fs.h"
 #include "buf.h"
 
-struct {
-  struct spinlock lock;
-  struct buf buf[NBUF];
+#define NBUCKET 13
 
-  // Linked list of all buffers, through prev/next.
-  // Sorted by how recently the buffer was used.
-  // head.next is most recent, head.prev is least.
-  struct buf head;
+struct {
+  struct spinlock lock[NBUCKET];
+  struct buf      buf[NBUF];
+  struct buf      hashbucket[NBUCKET]; // 桶链表头
 } bcache;
 
-void
-binit(void)
+static inline uint hash(uint blockno)
 {
-  struct buf *b;
+  return blockno % NBUCKET;
+}
 
-  initlock(&bcache.lock, "bcache");
+/* 原子读 ticks */
+static uint64
+get_ticks(void)
+{
+  uint64 t;
+  push_off();
+  t = ticks;
+  pop_off();
+  return t;
+}
 
-  // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
-  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+void binit(void)
+{
+  for (int i = 0; i < NBUCKET; i++) {
+    initlock(&bcache.lock[i], "bcache.bucket");
+    bcache.hashbucket[i].prev = &bcache.hashbucket[i];
+    bcache.hashbucket[i].next = &bcache.hashbucket[i];
   }
+  for (int i = 0; i < NBUF; i++) {
+    initsleeplock(&bcache.buf[i].lock, "buffer");
+    bcache.buf[i].refcnt    = 0;
+    bcache.buf[i].timestamp = 0;
+    /* 均匀预分布到桶 */
+    int h = i % NBUCKET;
+    bcache.buf[i].next = bcache.hashbucket[h].next;
+    bcache.buf[i].prev = &bcache.hashbucket[h];
+    bcache.hashbucket[h].next->prev = &bcache.buf[i];
+    bcache.hashbucket[h].next       = &bcache.buf[i];
+  }
+}
+/* 跨桶窃取：返回最小时间戳空闲块，调用者已放原桶锁 */
+static struct buf * steal_min_ticks(int my_h)
+{
+  struct buf *min_b = 0;
+  uint64 min_t = ~0ULL;
+
+  for (int i = 0; i < NBUCKET; i++) {
+    if (i == my_h) continue;
+    acquire(&bcache.lock[i]);
+    for (struct buf *b = bcache.hashbucket[i].next;
+         b != &bcache.hashbucket[i]; b = b->next) {
+      if (b->refcnt == 0 && b->timestamp < min_t) {
+        min_t = b->timestamp;
+        min_b = b;
+      }
+    }
+    if (min_b) {
+      min_b->refcnt = 1;
+      /* 从原桶摘下 */
+      min_b->next->prev = min_b->prev;
+      min_b->prev->next = min_b->next;
+      release(&bcache.lock[i]);
+      return min_b;
+    }
+    release(&bcache.lock[i]);
+  }
+  return 0;
 }
 
 // Look through buffer cache for block on device dev.
 // If not found, allocate a buffer.
 // In either case, return locked buffer.
-static struct buf*
-bget(uint dev, uint blockno)
+static struct buf* bget(uint dev, uint blockno)
 {
-  struct buf *b;
+  uint h = hash(blockno);
+  acquire(&bcache.lock[h]);
 
-  acquire(&bcache.lock);
-
-  // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
-    if(b->dev == dev && b->blockno == blockno){
+  //桶内命中
+  for (struct buf *b = bcache.hashbucket[h].next;
+       b != &bcache.hashbucket[h]; b = b->next) {
+    if (b->dev == dev && b->blockno == blockno) {
       b->refcnt++;
-      release(&bcache.lock);
+      release(&bcache.lock[h]);
       acquiresleep(&b->lock);
       return b;
     }
+  }
+    /* 2. 桶内找最小时间戳空闲块 */
+  struct buf *min_b = 0;
+  uint64 min_t = ~0ULL;
+  for (struct buf *b = bcache.hashbucket[h].next;
+       b != &bcache.hashbucket[h]; b = b->next) {
+    if (b->refcnt == 0 && b->timestamp < min_t) {
+      min_t = b->timestamp;
+      min_b = b;
+    }
+  }
+  if (min_b) {
+    min_b->dev = dev;
+    min_b->blockno = blockno;
+    min_b->valid = 0;
+    min_b->refcnt = 1;
+    min_b->timestamp = 0;   // brelse 将设置
+    /* 移到桶头（MRU）*/
+    min_b->next->prev = min_b->prev;
+    min_b->prev->next = min_b->next;
+    min_b->next = bcache.hashbucket[h].next;
+    min_b->prev = &bcache.hashbucket[h];
+    bcache.hashbucket[h].next->prev = min_b;
+    bcache.hashbucket[h].next = min_b;
+    release(&bcache.lock[h]);
+    acquiresleep(&min_b->lock);
+    return min_b;
   }
 
-  // Not cached.
-  // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
-    if(b->refcnt == 0) {
-      b->dev = dev;
-      b->blockno = blockno;
-      b->valid = 0;
-      b->refcnt = 1;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
-    }
+  /* 3. 本桶无空闲，跨桶窃取 */
+  release(&bcache.lock[h]);
+  struct buf *sb = steal_min_ticks(h);
+  if (sb) {
+    acquire(&bcache.lock[h]);
+    sb->dev = dev;
+    sb->blockno = blockno;
+    sb->valid = 0;
+    sb->timestamp = 0;
+    /* 挂到桶头 */
+    sb->next = bcache.hashbucket[h].next;
+    sb->prev = &bcache.hashbucket[h];
+    bcache.hashbucket[h].next->prev = sb;
+    bcache.hashbucket[h].next = sb;
+    release(&bcache.lock[h]);
+    acquiresleep(&sb->lock);
+    return sb;
   }
-  panic("bget: no buffers");
+
+  panic("bget: no buffer");
 }
 
 // Return a locked buf with the contents of the indicated block.
@@ -120,34 +195,20 @@ brelse(struct buf *b)
     panic("brelse");
 
   releasesleep(&b->lock);
-
-  acquire(&bcache.lock);
-  b->refcnt--;
-  if (b->refcnt == 0) {
-    // no one is waiting for it.
-    b->next->prev = b->prev;
-    b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
-  }
   
-  release(&bcache.lock);
+  if (__sync_sub_and_fetch(&b->refcnt, 1) == 0) {
+    b->timestamp = get_ticks();
+  }
 }
 
 void
 bpin(struct buf *b) {
-  acquire(&bcache.lock);
-  b->refcnt++;
-  release(&bcache.lock);
+  __sync_fetch_and_add(&b->refcnt, 1);
 }
 
 void
 bunpin(struct buf *b) {
-  acquire(&bcache.lock);
-  b->refcnt--;
-  release(&bcache.lock);
+  __sync_fetch_and_sub(&b->refcnt, 1);
 }
 
 
