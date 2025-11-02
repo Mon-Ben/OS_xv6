@@ -225,3 +225,7 @@ int             sockread(struct sock *, uint64, int);
 int             sockwrite(struct sock *, uint64, int);
 void            sockrecvudp(struct mbuf*, uint32, uint16, uint16);
 #endif
+
+// per-process kernel pagetable helpers (implemented in vm.c)
+pagetable_t kvmcreate(void);
+void free_kpagetable(pagetable_t kp);

@@ -421,3 +421,56 @@ void vmprint(pagetable_t pagetable)
   printf("page table %p\n", (void *)pagetable);
   _vmprint_recurse(pagetable, 2, 0);
 }
+
+// 为每个进程创建独立的内核页表（注意：不映射 CLINT）
+pagetable_t
+kvmcreate(void)
+{
+  pagetable_t kpt = (pagetable_t)kalloc();
+  if (kpt == 0)
+    return 0;
+  memset(kpt, 0, PGSIZE);
+
+  // 将与内核相关的必要映射复制（与 kvminit 相似，但不映射 CLINT）
+  if (mappages(kpt, UART0, PGSIZE, UART0, PTE_R | PTE_W) != 0)
+    goto bad;
+  if (mappages(kpt, VIRTIO0, PGSIZE, VIRTIO0, PTE_R | PTE_W) != 0)
+    goto bad;
+  if (mappages(kpt, PLIC, 0x400000, PLIC, PTE_R | PTE_W) != 0)
+    goto bad;
+  // kernel text and ro
+  if (mappages(kpt, KERNBASE, (uint64)etext - KERNBASE, KERNBASE, PTE_R | PTE_X) != 0)
+    goto bad;
+  // kernel data and physical RAM used
+  if (mappages(kpt, (uint64)etext, (PHYSTOP - (uint64)etext), (uint64)etext, PTE_R | PTE_W) != 0)
+    goto bad;
+  // trampoline (与全局页表一致)
+  if (mappages(kpt, TRAMPOLINE, PGSIZE, (uint64)trampoline, PTE_R | PTE_X) != 0)
+    goto bad;
+
+  return kpt;
+bad:
+  kfree((void *)kpt);
+  return 0;
+}
+
+// 释放页表页，但不释放叶子映射（叶子所指物理页不在此处释放）
+void
+free_kpagetable(pagetable_t pagetable)
+{
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = pagetable[i];
+    if (!(pte & PTE_V))
+      continue;
+    // 非叶节点：递归释放页表页
+    if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+      uint64 child = PTE2PA(pte);
+      free_kpagetable((pagetable_t)child);
+      pagetable[i] = 0;
+    } else {
+      // 叶子：清除 PTE，但不 kfree 指向的物理页帧
+      pagetable[i] = 0;
+    }
+  }
+  kfree((void *)pagetable);
+}

@@ -20,7 +20,10 @@ static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
 
 extern char trampoline[];  // trampoline.S
-
+extern pagetable_t kernel_pagetable; // 来自 vm.c
+// kvmcreate/free_kpagetable 在 defs.h 已声明
+// walk 在 vm.c 中定义，这里声明其原型以避免隐式声明编译错误
+extern pte_t *walk(pagetable_t pagetable, uint64 va, int alloc);
 // initialize the proc table at boot time.
 void procinit(void) {
   struct proc *p;
@@ -33,10 +36,14 @@ void procinit(void) {
     // Map it high in memory, followed by an invalid
     // guard page.
     char *pa = kalloc();
-    if (pa == 0) panic("kalloc");
+    if (pa == 0)
+      panic("kalloc");
     uint64 va = KSTACK((int)(p - proc));
+    // 在全局 kernel_pagetable 中保留映射（procinit 时建立）
     kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
     p->kstack = va;
+    p->kstack_pa = (uint64)pa; // 保存物理页，供 allocproc 在 per-process kernel pagetable 中映射
+    p->k_pagetable = 0;
   }
   kvminithart();
 }
@@ -117,6 +124,21 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  // 为该进程创建独立的内核页表，并在其中映射该进程的内核栈
+  p->k_pagetable = kvmcreate();
+  if (p->k_pagetable == 0) {
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  if (mappages(p->k_pagetable, p->kstack, PGSIZE, p->kstack_pa, PTE_R | PTE_W) != 0) {
+    free_kpagetable(p->k_pagetable);
+    p->k_pagetable = 0;
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
   return p;
 }
 
@@ -124,11 +146,29 @@ found:
 // including user pages.
 // p->lock must be held.
 static void freeproc(struct proc *p) {
-  if (p->trapframe) kfree((void *)p->trapframe);
+  if (p->trapframe)
+    kfree((void *)p->trapframe);
   p->trapframe = 0;
-  if (p->pagetable) proc_freepagetable(p->pagetable, p->sz);
+  if (p->pagetable)
+    proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
   p->sz = 0;
+  // 释放进程的内核页表（只释放页表页，不释放叶子映射指向的物理页）
+  if (p->k_pagetable) {
+    free_kpagetable(p->k_pagetable);
+    p->k_pagetable = 0;
+  }
+  // 取消全局 kernel_pagetable 对该内核栈的映射并释放内核栈物理页
+  if (p->kstack) {
+    pte_t *kpte = walk(kernel_pagetable, p->kstack, 0);
+    if (kpte && (*kpte & PTE_V)) {
+      uint64 pa = PTE2PA(*kpte);
+      *kpte = 0;
+      kfree((void *)pa);
+    }
+    p->kstack = 0;
+    p->kstack_pa = 0;
+  }
   p->pid = 0;
   p->parent = 0;
   p->name[0] = 0;
@@ -418,6 +458,9 @@ void scheduler(void) {
 
   c->proc = 0;
   for (;;) {
+    // 保证调度器在全局 kernel_pagetable 下运行
+    w_satp(MAKE_SATP(kernel_pagetable));
+    sfence_vma();
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
 
@@ -430,8 +473,14 @@ void scheduler(void) {
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        // 切换到该进程时载入其独立的内核页表
+        w_satp(MAKE_SATP(p->k_pagetable));
+        sfence_vma();
         swtch(&c->context, &p->context);
 
+        // 进程运行结束回到调度器时恢复全局 kernel_pagetable
+        w_satp(MAKE_SATP(kernel_pagetable));
+        sfence_vma();
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
