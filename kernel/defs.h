@@ -180,6 +180,10 @@ int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 int             test_pagetable();
 void            vmprint(pagetable_t);
+// per-process kernel pagetable helpers (implemented in vm.c)
+pagetable_t kvmcreate(void);
+void free_kpagetable(pagetable_t kp);
+
 
 // plic.c
 void            plicinit(void);
@@ -226,6 +230,3 @@ int             sockwrite(struct sock *, uint64, int);
 void            sockrecvudp(struct mbuf*, uint32, uint16, uint16);
 #endif
 
-// per-process kernel pagetable helpers (implemented in vm.c)
-pagetable_t kvmcreate(void);
-void free_kpagetable(pagetable_t kp);
