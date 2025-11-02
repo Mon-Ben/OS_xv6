@@ -379,3 +379,45 @@ int test_pagetable() {
   printf("test_pagetable: %d\n", satp != gsatp);
   return satp != gsatp;
 }
+
+// 递归打印助手：level=2/1/0 对应 L2/L1/L0
+static void
+_vmprint_recurse(pagetable_t pt, int level, uint64 va_prefix)
+{
+  for (int idx = 0; idx < 512; idx++) {
+    pte_t pte = pt[idx];
+    if (!(pte & PTE_V)) continue;          // 跳过无效项
+
+    uint64 pa   = PTE2PA(pte);
+    uint64 flags = PTE_FLAGS(pte);
+    char flagstr[5] = {0};
+    flagstr[0] = (flags & PTE_R) ? 'r' : '-';
+    flagstr[1] = (flags & PTE_W) ? 'w' : '-';
+    flagstr[2] = (flags & PTE_X) ? 'x' : '-';
+    flagstr[3] = (flags & PTE_U) ? 'u' : '-';
+    flagstr[4] = 0;
+
+    int groups = 3 - level;
+    for (int g = 0; g < groups; g++) {
+      if (g > 0) printf("   ");
+      printf("||");
+    }
+
+    if (level > 0) {
+      // 非叶节点：只打印 idx + 下一级页表物理地址
+      printf("idx: %d: pa: %p, flags: %s\n", idx, (void *)pa, flagstr);
+      _vmprint_recurse((pagetable_t)pa, level - 1, va_prefix | ((uint64)idx << PXSHIFT(level)));
+    } else {
+      // 叶节点：打印虚拟地址 -> 物理地址
+      uint64 va = va_prefix | ((uint64)idx << PXSHIFT(0));
+      printf("idx: %d: va: %p -> pa: %p, flags: %s\n", idx, (void *)va, (void *)pa, flagstr);
+    }
+  }
+}
+
+// 外部接口：打印根页表
+void vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", (void *)pagetable);
+  _vmprint_recurse(pagetable, 2, 0);
+}
