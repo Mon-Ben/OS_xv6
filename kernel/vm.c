@@ -316,21 +316,12 @@ int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len) {
 // Copy len bytes to dst from virtual address srcva in a given page table.
 // Return 0 on success, -1 on error.
 int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
-  uint64 n, va0, pa0;
-
-  while (len > 0) {
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if (pa0 == 0) return -1;
-    n = PGSIZE - (srcva - va0);
-    if (n > len) n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
-
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+  w_sstatus(r_sstatus()|(1<<18));
+  //修改sstatus寄存器的SUM位
+  int ret = copyin_new(pagetable, dst, srcva, len);
+  w_sstatus(r_sstatus() & ~(1 << 18));
+  //去掉sstatus寄存器的SUM位
+  return ret;
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -338,39 +329,13 @@ int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
 // until a '\0', or max.
 // Return 0 on success, -1 on error.
 int copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max) {
-  uint64 n, va0, pa0;
-  int got_null = 0;
-
-  while (got_null == 0 && max > 0) {
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if (pa0 == 0) return -1;
-    n = PGSIZE - (srcva - va0);
-    if (n > max) n = max;
-
-    char *p = (char *)(pa0 + (srcva - va0));
-    while (n > 0) {
-      if (*p == '\0') {
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
-
-    srcva = va0 + PGSIZE;
-  }
-  if (got_null) {
-    return 0;
-  } else {
-    return -1;
-  }
+  w_sstatus(r_sstatus()|(1<<18));
+  //修改sstatus寄存器的SUM位
+  int ret = copyinstr_new(pagetable, dst, srcva, max);
+  w_sstatus(r_sstatus() & ~(1 << 18));
+  return ret;
 }
+
 
 // check if use global kpgtbl or not
 int test_pagetable() {
@@ -423,13 +388,12 @@ void vmprint(pagetable_t pagetable)
 }
 
 // 为每个进程创建独立的内核页表（注意：不映射 CLINT）
-pagetable_t
-kvmcreate(void)
+pagetable_t kvmcreate(void)
 {
   pagetable_t kpt = (pagetable_t)kalloc();
   if (kpt == 0)
     return 0;
-  memset(kpt, 0, PGSIZE);
+  memset(kpt, 0, PGSIZE);//分配内核页表空间
 
   // 将与内核相关的必要映射复制（与 kvminit 相似，但不映射 CLINT）
   if (mappages(kpt, UART0, PGSIZE, UART0, PTE_R | PTE_W) != 0)
@@ -464,6 +428,7 @@ free_kpagetable(pagetable_t pagetable)
       continue;
     // 非叶节点：递归释放页表页
     if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+      //保证递归到L1，按顺序释放
       uint64 child = PTE2PA(pte);
       free_kpagetable((pagetable_t)child);
       pagetable[i] = 0;

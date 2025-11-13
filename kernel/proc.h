@@ -95,10 +95,12 @@ struct proc {
   int pid;                     // Process ID
 
   // these are private to the process, so p->lock need not be held.
+  
   uint64 kstack_pa;        // 内核栈的物理地址（由 procinit 分配并保存）
   uint64 kstack;           // kernel stack virtual address
   uint64 sz;                   // Size of process memory (bytes)
   pagetable_t pagetable; // user pagetable
+
   pagetable_t k_pagetable; // 每个进程独立的内核页表
   struct trapframe *trapframe; // data page for trampoline.S
   struct context context;      // swtch() here to run process

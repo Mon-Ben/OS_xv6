@@ -24,7 +24,8 @@ extern pagetable_t kernel_pagetable; // 来自 vm.c
 // kvmcreate/free_kpagetable 在 defs.h 已声明
 // walk 在 vm.c 中定义，这里声明其原型以避免隐式声明编译错误
 extern pte_t *walk(pagetable_t pagetable, uint64 va, int alloc);
-// initialize the proc table at boot time.
+
+// initialize the proc table at boot time.初始化进程页表
 void procinit(void) {
   struct proc *p;
 
@@ -32,9 +33,9 @@ void procinit(void) {
   for (p = proc; p < &proc[NPROC]; p++) {
     initlock(&p->lock, "proc");
 
-    // Allocate a page for the process's kernel stack.
-    // Map it high in memory, followed by an invalid
-    // guard page.
+    // 为该进程的内核栈分配一页物理页。
+    // 将其映射到高地址空间，并在其上方保留一页无效的
+    // 保护页（guard page）。
     char *pa = kalloc();
     if (pa == 0)
       panic("kalloc");
@@ -117,14 +118,14 @@ found:
     release(&p->lock);
     return 0;
   }
-
+  // 为该进程在后续创建独立的内核页表（在下方统一创建并检查）
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
-  // 为该进程创建独立的内核页表，并在其中映射该进程的内核栈
+  // 统一创建内核页表并映射内核栈（保持与原 xv6 逻辑一致）
   p->k_pagetable = kvmcreate();
   if (p->k_pagetable == 0) {
     freeproc(p);
@@ -232,7 +233,8 @@ void userinit(void) {
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
-
+  //初始化融合
+  sync_pagetable(p->k_pagetable,p->pagetable);
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -256,7 +258,14 @@ int growproc(int n) {
     if ((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    sync_pagetable(p->pagetable,p->k_pagetable);//同步页表
   } else if (n < 0) {
+    //代码评审PGROUNDUP(sz + n) < PGROUNDUP(sz) 仅在页边界变化时才会执行 uvmunmap，
+    //但如果 sz + n 小于零（即收缩到负数），可能导致非法内存操作。应在收缩前检查 sz + n >= 0，防止越界。
+    if (PGROUNDUP(sz + n) < PGROUNDUP(sz)) {
+      int npages = (PGROUNDUP(sz) - PGROUNDUP(sz + n)) / PGSIZE;
+      uvmunmap(p->k_pagetable, PGROUNDUP(sz + n), npages, 0);
+    }
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
   p->sz = sz;
@@ -282,7 +291,8 @@ int fork(void) {
     return -1;
   }
   np->sz = p->sz;
-
+  //子进程完成了用户页表的继承
+  sync_pagetable(p->k_pagetable,p->pagetable);
   np->parent = p;
 
   // copy saved user registers.
@@ -377,7 +387,9 @@ void exit(int status) {
   acquire(&original_parent->lock);
 
   acquire(&p->lock);
-
+  // 切换到全局 kernel_pagetable 并立即刷新 TLB，保证原子性，防止残留
+  w_satp(MAKE_SATP(kernel_pagetable));
+  sfence_vma();
   // Give any children to init.
   reparent(p);
 
@@ -453,6 +465,8 @@ int wait(uint64 addr) {
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
 void scheduler(void) {
+  w_satp(MAKE_SATP(kernel_pagetable));
+  sfence_vma();
   struct proc *p;
   struct cpu *c = mycpu();
 
@@ -475,8 +489,8 @@ void scheduler(void) {
         c->proc = p;
         // 切换到该进程时载入其独立的内核页表
         w_satp(MAKE_SATP(p->k_pagetable));
-        sfence_vma();
-        swtch(&c->context, &p->context);
+        sfence_vma();// 刷新 TLB
+        swtch(&c->context, &p->context);// 切换到进程上下文
 
         // 进程运行结束回到调度器时恢复全局 kernel_pagetable
         w_satp(MAKE_SATP(kernel_pagetable));

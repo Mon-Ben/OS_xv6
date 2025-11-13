@@ -180,10 +180,15 @@ int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 int             test_pagetable();
 void            vmprint(pagetable_t);
-// per-process kernel pagetable helpers (implemented in vm.c)
-pagetable_t kvmcreate(void);
-void free_kpagetable(pagetable_t kp);
 
+// per-process kernel pagetable helpers (implemented in vm.c)
+pagetable_t     kvmcreate(void);
+void            free_kpagetable(pagetable_t kp);
+
+//vmcopyin.c
+void            sync_pagetable(pagetable_t kpt, pagetable_t uptbl);
+int             copyin_new(pagetable_t, char *, uint64, uint64);
+int             copyinstr_new(pagetable_t, char *, uint64, uint64);
 
 // plic.c
 void            plicinit(void);
