@@ -129,8 +129,7 @@ found:
 
 
 // 释放页表页，但不释放叶子映射（叶子所指物理页不在此处释放）
-void
-free_kpagetable(pagetable_t pagetable)
+void free_kpagetable(pagetable_t pagetable)
 {
   for (int i = 0; i < 512; i++) {
     pte_t pte = pagetable[i];
@@ -166,6 +165,7 @@ static void freeproc(struct proc *p) {
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  // Free the kernel page table
   if (p->k_pagetable) free_kpagetable(p->k_pagetable);
 }
 
@@ -223,6 +223,7 @@ void userinit(void) {
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+  // 同步页表内容到进程的内核页表
   sync_pagetable(p->pagetable, p->k_pagetable);
 
   // prepare for the very first "return" from kernel to user.
@@ -248,6 +249,7 @@ int growproc(int n) {
     if ((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    // 同步页表内容到进程的内核页表
     sync_pagetable(p->pagetable, p->k_pagetable);
   } else if (n < 0) {
     if (PGROUNDUP(sz + n) < PGROUNDUP(sz)) {
@@ -279,7 +281,7 @@ int fork(void) {
     return -1;
   }
   np->sz = p->sz;
-
+  // 同步页表内容到子进程的内核页表
   sync_pagetable(np->pagetable, np->k_pagetable);
 
   np->parent = p;
@@ -443,7 +445,7 @@ int wait(uint64 addr) {
     }
 
     // Wait for a child to exit.
-    sleep(p, &p->lock);  // DOC: wait-sleep
+    sleep(p, &p->lock);
   }
 }
 
@@ -474,12 +476,14 @@ void scheduler(void) {
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
-
+        
+        // 切换到进程的内核页表，确保进程在内核态运行时访问自己的内核栈和相关资源
         w_satp(MAKE_SATP(p->k_pagetable));
         sfence_vma();
-
+        // 切换到进程上下文，开始执行进程
         swtch(&c->context, &p->context);
 
+        // swtch 返回后，切回内核的全局页表，恢复内核环境
         w_satp(MAKE_SATP(kernel_pagetable));
         sfence_vma();
 

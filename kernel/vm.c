@@ -318,8 +318,10 @@ int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len) {
 // Copy len bytes to dst from virtual address srcva in a given page table.
 // Return 0 on success, -1 on error.
 int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
+  //使用超级用户权限以确保访问用户空间地址
   w_sstatus(r_sstatus() | (1 << 18));
   int ret = copyin_new(pagetable, dst, srcva, len);
+  //恢复原有权限设置
   w_sstatus(r_sstatus() & ~(1 << 18));
   return ret;
 }
@@ -329,8 +331,10 @@ int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
 // until a '\0', or max.
 // Return 0 on success, -1 on error.
 int copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max) {
+  //使用超级用户权限以确保访问用户空间地址
   w_sstatus(r_sstatus() | (1 << 18));
   int ret = copyinstr_new(pagetable, dst, srcva, max);
+  //恢复原有权限设置
   w_sstatus(r_sstatus() & ~(1 << 18));
   return ret;
 }
@@ -414,35 +418,43 @@ bad:
   return 0;
 }
 
-void _sync_pagetable(pagetable_t proc, pagetable_t kernel, uint64 va, int level) 
+// 将用户页表的 L2 篇（覆盖用户地址空间）复制到进程的内核页表。
+// 这里不复制 CLINT/设备映射，只把用户空间的根级目录项共享过来。
+void tool_sync_pagetable(pagetable_t uptbl, pagetable_t kpt, uint64 va_prefix, int level) 
 {
-  for (int i = 0; i < 512; i++, va++) 
+  for (int idx = 0; idx < 512; idx++, va_prefix++) 
   {
-    if ((va << (level * 9 + 12)) >= PLIC)
-      return;
-    pte_t p = proc[i];
-    pte_t k = kernel[i];
-    if ((p & PTE_V) && !(k & PTE_V))
+    if((va_prefix<<PXSHIFT(level))>=PLIC) return;// 超出用户地址空间范围，停止
+    pte_t p = uptbl[idx];
+    pte_t k = kpt[idx];
+    if ((p & PTE_V) && !(k & PTE_V))//如果proc用户有效，内核k无效
     {
       if ((p & (PTE_R | PTE_W | PTE_X)) == 0)
       {
+        // 非叶节点：为内核页表分配新的页表页
         pagetable_t pa = kalloc();
-        memset(pa, 0, PGSIZE);
-        kernel[i] = PA2PTE(pa) | (p & (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U));
+        memset(pa, 0, PGSIZE);//新建pa，为pa提供空间
+        kpt[idx] = PA2PTE(pa) | (p & (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U));
       }
       else
       {
-        kernel[i] = p;
+        kpt[idx] = p;//内核页表直接共享用户页表的叶子页表  
       }
     }
-    if ((p & PTE_V) && (p & (PTE_R | PTE_W | PTE_X)) == 0)
+    if ((p & PTE_V) && (p & (PTE_R | PTE_W | PTE_X)) == 0)//这一层已经搞定了
     {
-      _sync_pagetable((pagetable_t) PTE2PA(p), (pagetable_t) PTE2PA(kernel[i]), va << 9, level - 1);
+      // 非叶节点：递归同步下一级页表
+      tool_sync_pagetable((pagetable_t) PTE2PA(p), (pagetable_t) PTE2PA(kpt[idx]), va_prefix << 9, level - 1);
     }
   }
 }
-
-void sync_pagetable(pagetable_t proc, pagetable_t kernel)
+// kpt: 进程专属内核页表根； uptbl: 进程的用户页表根
+// 同步用户页表内容到新的内核页表
+// sync_pagetable 的作用是将用户页表中的映射同步到新分配的内核页表，
+// 这样可以确保进程在切换到新的内核页表后，用户空间的映射不会丢失，
+// 保证进程能够正常访问用户空间的内存资源，防止因页表不同步导致的访问异常。
+// 这是在重新分配内核页表时必须的步骤，确保新旧页表内容一致性和进程运行的正确性。
+void sync_pagetable(pagetable_t uptbl, pagetable_t kpt)
 {
-  _sync_pagetable(proc, kernel, 0, 2);
+  tool_sync_pagetable(uptbl, kpt, 0, 2);
 }
