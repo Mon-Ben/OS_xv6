@@ -108,6 +108,9 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
+int             copyin_new(pagetable_t, char *, uint64, uint64);
+int             copyinstr_new(pagetable_t, char *, uint64, uint64);
+void            sync_pagetable(pagetable_t, pagetable_t);
 
 // swtch.S
 void            swtch(struct context*, struct context*);
@@ -180,15 +183,8 @@ int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 int             test_pagetable();
 void            vmprint(pagetable_t);
-
-// per-process kernel pagetable helpers (implemented in vm.c)
 pagetable_t     kvmcreate(void);
-void            free_kpagetable(pagetable_t kp);
-
-//vmcopyin.c
-void            sync_pagetable(pagetable_t kpt, pagetable_t uptbl);
-int             copyin_new(pagetable_t, char *, uint64, uint64);
-int             copyinstr_new(pagetable_t, char *, uint64, uint64);
+void            free_kpagetable(pagetable_t pagetable);
 
 // plic.c
 void            plicinit(void);
@@ -234,4 +230,3 @@ int             sockread(struct sock *, uint64, int);
 int             sockwrite(struct sock *, uint64, int);
 void            sockrecvudp(struct mbuf*, uint32, uint16, uint16);
 #endif
-

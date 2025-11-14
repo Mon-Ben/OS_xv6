@@ -35,8 +35,10 @@ void usertrap(void) {
   w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
+
   w_satp(MAKE_SATP(p->k_pagetable));
   sfence_vma();
+
   // save user program counter.
   p->trapframe->epc = r_sepc();
 
@@ -113,25 +115,6 @@ void usertrapret(void) {
   ((void (*)(uint64, uint64))fn)(TRAPFRAME, satp);
 }
 
-// 新增：打印内核帧指针链上的返回地址，便于后续 addr2line/map
-static void
-print_kernel_backtrace(void)
-{
-  uint64 fp;
-  // 读取 s0 (frame pointer) 寄存器
-  asm volatile("mv %0, s0" : "=r"(fp));
-  printf("kernel backtrace (fp chain):\n");
-  while(fp) {
-    // 在 RISC-V 帧布局中：[0] previous fp, [8] return address (ra)
-    uint64 ra = 0;
-    if ((uint64)fp < (uint64)0x80000000UL) break; // 简单边界检查（根据内核地址空间调整）
-    // 尝试安全读取内存（若读取导致更严重崩溃，此处为尽量无害的尝试）
-    ra = *(uint64*)(fp + 8);
-    printf("  fp %p ra %p\n", fp, ra);
-    fp = *(uint64*)fp;
-  }
-}
-
 // interrupts and exceptions from kernel code go here via kernelvec,
 // on whatever the current kernel stack is.
 void kerneltrap() {
@@ -146,7 +129,6 @@ void kerneltrap() {
   if ((which_dev = devintr()) == 0) {
     printf("scause %p\n", scause);
     printf("sepc=%p stval=%p\n", r_sepc(), r_stval());
-    print_kernel_backtrace();
     panic("kerneltrap");
   }
 

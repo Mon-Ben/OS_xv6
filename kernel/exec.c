@@ -8,6 +8,7 @@
 #include "elf.h"
 
 static int loadseg(pde_t *pgdir, uint64 addr, struct inode *ip, uint offset, uint sz);
+
 extern pagetable_t kernel_pagetable;
 
 int exec(char *path, char **argv) {
@@ -90,31 +91,18 @@ int exec(char *path, char **argv) {
     if (*s == '/') last = s + 1;
   safestrcpy(p->name, last, sizeof(p->name));
 
-  // 保存当前进程的内核页表指针
+  // free process' kernel pagetable and remake one
   pagetable_t tmp = p->k_pagetable;
-
-  // 切换到全局内核页表，确保后续释放和分配安全
   p->k_pagetable = kernel_pagetable;
   w_satp(MAKE_SATP(kernel_pagetable));
   sfence_vma();
-
-  // 释放旧的内核页表资源，防止内存泄漏
   free_kpagetable(tmp);
-
-  // 重新分配并初始化进程的内核页表
   tmp = kvmcreate();
-
-  // 映射内核栈，防止映射丢失
   mappages(tmp, p->kstack, PGSIZE, p->kstack_pa, PTE_R | PTE_W);
-
-  sync_pagetable(tmp, pagetable); // 当需要建立一个新的页表时，加上映射
-
-  // 切换回进程自己的内核页表
+  sync_pagetable(pagetable, tmp);
   p->k_pagetable = tmp;
   w_satp(MAKE_SATP(p->k_pagetable));
   sfence_vma();
-
-  // 页表切换逻辑：先切到全局内核页表，释放旧资源，再分配新页表并映射内核栈，最后切回进程页表，确保资源安全和映射完整。
 
   // Commit to the user image.
   oldpagetable = p->pagetable;
@@ -123,9 +111,9 @@ int exec(char *path, char **argv) {
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp;          // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
-  
-  //输出第一个进程或刚载入程序的页表
-  if(p->pid==1) vmprint(p->pagetable);
+
+  if (p->pid == 1)
+    vmprint(p->pagetable);
 
   return argc;  // this ends up in a0, the first argument to main(argc, argv)
 
@@ -135,6 +123,7 @@ bad:
     iunlockput(ip);
     end_op();
   }
+
   return -1;
 }
 
