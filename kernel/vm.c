@@ -444,7 +444,7 @@ void tool_sync_pagetable(pagetable_t uptbl, pagetable_t kpt, uint64 va_prefix, i
     if ((p & PTE_V) && (p & (PTE_R | PTE_W | PTE_X)) == 0)//这一层已经搞定了
     {
       // 非叶节点：递归同步下一级页表
-      tool_sync_pagetable((pagetable_t) PTE2PA(p), (pagetable_t) PTE2PA(kpt[idx]), va_prefix << 9, level - 1);
+      tool_sync_pagetable((pagetable_t) PTE2PA(uptbl[idx]), (pagetable_t) PTE2PA(kpt[idx]), va_prefix | ((uint64)idx << PXSHIFT(level)), level - 1);
     }
   }
 }
