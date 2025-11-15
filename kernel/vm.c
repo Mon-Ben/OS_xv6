@@ -433,6 +433,7 @@ void tool_sync_pagetable(pagetable_t uptbl, pagetable_t kpt, uint64 va_prefix, i
       {
         // 非叶节点：为内核页表分配新的页表页
         pagetable_t pa = kalloc();
+        if (pa == 0) panic("tool_sync_pagetable: kalloc failed");
         memset(pa, 0, PGSIZE);//新建pa，为pa提供空间
         kpt[idx] = PA2PTE(pa) | (p & (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U));
       }
@@ -444,7 +445,10 @@ void tool_sync_pagetable(pagetable_t uptbl, pagetable_t kpt, uint64 va_prefix, i
     if ((p & PTE_V) && (p & (PTE_R | PTE_W | PTE_X)) == 0)//这一层已经搞定了
     {
       // 非叶节点：递归同步下一级页表
-      tool_sync_pagetable((pagetable_t) PTE2PA(p), (pagetable_t) PTE2PA(kpt[idx]), va_prefix << 9, level - 1);
+      pagetable_t child_u = (pagetable_t)PTE2PA(p);
+      pagetable_t child_k = (pagetable_t)PTE2PA(kpt[idx]);
+      uint64 new_prefix = va_prefix  << 9;//更新虚拟地址前缀，下一级索引
+      tool_sync_pagetable(child_u, child_k, new_prefix, level - 1);
     }
   }
 }
